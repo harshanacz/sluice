@@ -1,0 +1,71 @@
+name: Run tests from comment
+
+# Comment on a pull request with:
+#   run all test            -> mvn test (whole project)
+#   run test Foo.java       -> mvn test -Dtest=Foo   (also accepts "run test Foo")
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  test:
+    # Only PR comments from trusted users (comments can trigger arbitrary PR code)
+    if: >
+      github.event.issue.pull_request &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+      (startsWith(github.event.comment.body, 'run all test') ||
+       startsWith(github.event.comment.body, 'run test '))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Parse command
+        id: parse
+        env:
+          BODY: ${{ github.event.comment.body }}
+        run: |
+          first_line=$(printf '%s' "$BODY" | head -n1 | tr -d '\r' | xargs)
+          if [[ "$first_line" =~ ^run\ all\ tests?$ ]]; then
+            echo "args=" >> "$GITHUB_OUTPUT"
+            echo "label=all tests" >> "$GITHUB_OUTPUT"
+          elif [[ "$first_line" =~ ^run\ test\ ([A-Za-z0-9_]+)(\.java)?$ ]]; then
+            name="${BASH_REMATCH[1]}"
+            echo "args=-Dtest=$name" >> "$GITHUB_OUTPUT"
+            echo "label=$name" >> "$GITHUB_OUTPUT"
+          else
+            echo "Unrecognized command: $first_line"
+            exit 1
+          fi
+
+      - name: React to comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X POST "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" -f content=rocket
+
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.issue.number }}/head
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: maven
+
+      - name: Run tests (${{ steps.parse.outputs.label }})
+        run: mvn -B test ${{ steps.parse.outputs.args }}
+
+      - name: Report result
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS: ${{ job.status }}
+          LABEL: ${{ steps.parse.outputs.label }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$STATUS" = "success" ]; then icon="✅ passed"; else icon="❌ failed"; fi
+          gh pr comment "${{ github.event.issue.number }}" --repo "${{ github.repository }}" \
+            --body "$icon: \`$LABEL\` — [view run]($RUN_URL)"
